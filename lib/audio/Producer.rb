@@ -1,7 +1,7 @@
 require "open3"
 require "tmpdir"
 require "fileutils"
-require_relative "Chunk_queue"
+require_relative "chunk_queue"
 
 
 
@@ -10,7 +10,9 @@ module MusikVisulizer
     class Producer
       CHUNK_DURATION = 10
       SAMPLE_RATE = 44100
+      CHANNELS = 2
       BIT_RATE = 1
+      CENTER_STEREO_FILTER = "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1"
 
 
       class ProducerError < StandardError; end
@@ -31,9 +33,9 @@ module MusikVisulizer
           Thread.current.abort_on_exception = true
           begin
             if live_stream?(url)
-              process_live_stream(url)
+              produce_livestream(url)
             else
-              process_static_audio(url)
+              produce_chunks(url)
             end
           rescue => e
             puts "[Producer] Error processing URL #{url}: #{e.message}"
@@ -76,7 +78,7 @@ module MusikVisulizer
         end
       end
 
-      def doanload_chunk(url, offset, duration, index)
+      def download_chunk(url, offset, duration, index)
         output_path = File.join(@tmp_dir, "chunk_#{index}.%(ext)s")
         section = "*#{format_time(offset)}-#{format_time(offset + duration)}"
 
@@ -123,6 +125,7 @@ module MusikVisulizer
           "-acodec", "pcm_s16le",
           "-ar", SAMPLE_RATE.to_s,
           "-ac", CHANNELS.to_s,
+          "-af", CENTER_STEREO_FILTER,
           "-f", "segment",
           "-segment_time", CHUNK_DURATION.to_s,
           "-segment_format", "wav",
@@ -168,50 +171,51 @@ module MusikVisulizer
         end
       end
 
-    def fetch_stream_url
-      cmd = [
-        "yt-dlp",
-        "--get-url",
-        "--extract-audio",
-        url
-      ]
-      stdout, stderr, status = Open3.capture3(*cmd)
-      raise ProducerError, "Stream-URL" unless status.success?
+      def fetch_stream_url(url)
+        cmd = [
+          "yt-dlp",
+          "--get-url",
+          "--extract-audio",
+          url
+        ]
+        stdout, stderr, status = Open3.capture3(*cmd)
+        raise ProducerError, "Stream-URL: #{stderr.strip}" unless status.success?
 
-      stdout.strip
-    end
+        stdout.strip
+      end
 
+      def convert_to_wav(input_path, index)
+        output_path = File.join(@tmp_dir, "chunk_#{index}.wav")
 
+        cmd = [
+          "ffmpeg",
+          "-y",
+          "-i", input_path,
+          "-acodec", "pcm_s16le",
+          "-ar", SAMPLE_RATE.to_s,
+          "-ac", CHANNELS.to_s,
+          "-af", CENTER_STEREO_FILTER,
+          output_path,
+          "-loglevel", "error"
+        ]
 
-    def convert_to_wav(input_path, index)
-      output_path = File.join(@tmp_dir, "chunk_#{index}.wav")
+        _, stderr, status = Open3.capture3(*cmd)
+        raise ProducerError, "ffmpeg conversion: #{stderr.strip}" unless status.success?
+        output_path
+      end
 
-      cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-acodec", "pcm_s16le",
-        "-ar", SAMPLE_RATE.to_s,
-        "-ac", CHANNELS.to_s,
-        output_path,
-        "-loglevel", "error"
+      def fetch_duration(url)
+        cmd = [
+          "yt-dlp",
+          "--print", "duration",
+          "--no-playlist",
+          url
+        ]
+        stdout, stderr, status = Open3.capture3(*cmd)
+        raise ProducerError, "yt-dlp duration: #{stderr.strip}" unless status.success?
 
-    ]
-
-    _, stderr, status = Open3.capture3(*cmd)
-    raise ProducerError, "ffmpeg conversion" unless status.success?
-    output_path
-  end
-
-  def fetch_duration(url)
-    cmd = [
-      "yt-dlp",
-      "--print", "duration",
-      "--no-playlist", url]
-      raise ProducerError, "yt-dlp duration" unless status.success?
-
-    stdout.strip.to_f
-  end
+        stdout.strip.to_f
+      end
 
       def live_stream?(url)
         cmd = [
@@ -249,9 +253,25 @@ module MusikVisulizer
 
       def check_dependencies!
         %w[yt-dlp ffmpeg].each do |tool|
-          _, _, status = Open3.capture3("which #{tool}")
-          raise DependencyError, "#{tool} nicht gefunden" unless status.success?
-        end 
+          raise DependencyError, "#{tool} nicht gefunden" unless tool_available?(tool)
+        end
+      end
+
+      def tool_available?(tool)
+        path_env = ENV.fetch("PATH", "")
+        return false if path_env.empty?
+
+        extensions = if Gem.win_platform?
+                       ENV.fetch("PATHEXT", ".EXE;.BAT;.CMD").split(";")
+                     else
+                       [""]
+                     end
+
+        path_env.split(File::PATH_SEPARATOR).any? do |dir|
+          extensions.any? do |ext|
+            File.executable?(File.join(dir, "#{tool}#{ext}"))
+          end
+        end
       end
 
       def cleanup(path)
