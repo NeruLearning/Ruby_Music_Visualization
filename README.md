@@ -1,1 +1,1 @@
-![](https://media.tenor.com/h35xfacVTTEAAAAi/ame-needy-streamer-overload.gif)
+![](https://media.tenor.com/YOphBzO0MfoAAAAi/japanese-animation.gif)
