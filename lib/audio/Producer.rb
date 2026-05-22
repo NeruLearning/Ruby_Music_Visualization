@@ -49,7 +49,7 @@ module MusikVisulizer
             if live_stream?(url)
               produce_livestream(url)
             else
-              produce_chunks(url)
+              produce_streamed_chunks(url)
             end
           rescue => e
             $stderr.puts "[Producer] Error processing URL #{url}: #{e.message}"
@@ -165,6 +165,43 @@ module MusikVisulizer
         raise e
       end
 
+      def produce_streamed_chunks(url)
+        audio_url = fetch_audio_url(url)
+        set_playback_source(audio_url)
+
+        segment_pattern = File.join(@tmp_dir, "chunk_%03d.wav")
+        cmd = [
+          "ffmpeg",
+          "-i", audio_url,
+          "-acodec", "pcm_s16le",
+          "-ar", SAMPLE_RATE.to_s,
+          "-ac", CHANNELS.to_s,
+          "-af", CENTER_STEREO_FILTER,
+          "-f", "segment",
+          "-segment_time", CHUNK_DURATION.to_s,
+          "-segment_format", "wav",
+          segment_pattern,
+          "-loglevel", "error"
+        ]
+
+        ffmpeg_pid = spawn(*cmd)
+        index = 0
+
+        loop do
+          chunk_path = segment_pattern % index
+          break unless wait_for_segment_with_process(chunk_path, ffmpeg_pid, timeout: 20)
+
+          @queue.push(chunk_path)
+          index += 1
+        end
+      ensure
+        begin
+          Process.wait(ffmpeg_pid) if ffmpeg_pid
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+
 
 
 
@@ -183,6 +220,30 @@ module MusikVisulizer
           raise ProducerError, "Timeout" if Time.now - start > timeout
           sleep 0.1
         end
+      end
+
+      def wait_for_segment_with_process(path, pid, timeout: 20)
+        start = Time.now
+        loop do
+          if File.exist?(path)
+            size_before = File.size(path)
+            sleep 0.2
+            return true if File.size(path) == size_before && size_before > 0
+          end
+
+          return false unless process_alive?(pid)
+          raise ProducerError, "Timeout" if Time.now - start > timeout
+          sleep 0.1
+        end
+      end
+
+      def process_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
       end
 
       def fetch_stream_url(url)
@@ -217,23 +278,6 @@ module MusikVisulizer
       end
 
       def prepare_source(url)
-        output_path = File.join(@tmp_dir, "source.%(ext)s")
-        cmd = [
-          "yt-dlp",
-          "--no-playlist",
-          "-f", "bestaudio",
-          "--output", output_path,
-          "--print", "after_move:filepath",
-          url
-        ]
-
-        stdout, stderr, status = Open3.capture3(*cmd)
-        if status.success?
-          path = stdout.lines.map(&:strip).reject(&:empty?).last
-          return [path, true] if path && File.exist?(path)
-        end
-
-        warn "[Producer] Fallback to stream source: #{stderr.strip}" unless stderr.to_s.strip.empty?
         [fetch_audio_url(url), false]
       end
 

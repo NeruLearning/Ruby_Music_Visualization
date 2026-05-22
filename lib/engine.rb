@@ -31,12 +31,12 @@ module MusikVisulizer
 			visualizer = Visualizers::AsciiWave.new(buffer)
 
 			queue = Audio::ChunkQueue.new(max_size: 6)
-			producer = Audio::Producer.new(queue: queue)
 			loader = Audio::Loader.new
 			analyzer = Audio::Analyzer.new
 			player = Audio::Player.new
 			player.warn_unavailable
 			continuous = player.backend == :ffplay
+			producer = Audio::Producer.new(queue: queue)
 
 			setup_signal_handlers(producer)
 
