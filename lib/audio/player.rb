@@ -7,6 +7,8 @@ module MusikVisulizer
         @backend = detect_backend
       end
 
+      attr_reader :backend
+
       def available?
         !@backend.nil?
       end
@@ -36,6 +38,15 @@ module MusikVisulizer
         Process.wait(pid)
       rescue Errno::ECHILD
         nil
+      end
+
+      def running?(pid)
+        return false if pid.nil?
+
+        result = Process.waitpid(pid, Process::WNOHANG)
+        result.nil?
+      rescue Errno::ECHILD
+        false
       end
 
       private

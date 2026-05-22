@@ -18,44 +18,43 @@ module MusikVisulizer
       def initialize(buffer)
         super
         @smoothed = []
+        @last_cols = nil
       end
 
       def render(analysis)
         spectrum = analysis[:spectrum]
-        return if spectrum.nil? || spectrum.empty?
 
-        bins = downsample(spectrum, cols)
-        @smoothed = smooth(bins, @smoothed)
+        half_cols = (cols / 2.0).ceil
 
-        draw_rows = rows - 1
-
-        @smoothed.each_with_index do |value, col|
-          bar_height = map_range(value, 0, draw_rows)
-          color = interpolate_color(value)
-          color_code = Renderer::Terminal.rgb_fg(*color)
-
-          draw_rows.times do |row_from_top|
-            row_from_bottom = draw_rows -1 - row_from_top
-            row = row_from_top
-
-            if row_from_bottom < bar_height
-              char = if row_from_bottom == bar_height - 1
-                       block_char(value, draw_rows)
-                      else
-                        CHARS.last
-                      end
-              @buffer.set(row, col, char, color: color_code)
-            else
-              @buffer.set(row, col, " ")
-            end
-          end
+        # Bei Resize: smoothed zurücksetzen damit keine alten Werte reinlaufen
+        if @last_cols != cols
+          @smoothed = Array.new(half_cols, 0.0)
+          @last_cols = cols
         end
 
-        draw_info(analysis)
+        if spectrum.nil? || spectrum.empty?
+          @smoothed = @smoothed.map { |v| v * 0.15 }
+        else
+          bins = downsample(spectrum, half_cols)
+          @smoothed = smooth(bins, @smoothed)
+        end
+
+        draw_rows = rows
+        center_left = (cols - 1) / 2
+        center_right = cols / 2
+
+        @smoothed.each_with_index do |value, i|
+          left_col = center_left - i
+          right_col = center_right + i
+
+          draw_bar_at(left_col, value, draw_rows) if left_col >= 0
+          if right_col < cols && right_col != left_col
+            draw_bar_at(right_col, value, draw_rows)
+          end
+        end
       end
 
       private
-
 
       def downsample(spectrum, target_size)
         return spectrum if spectrum.length <= target_size
@@ -67,7 +66,6 @@ module MusikVisulizer
           slice.sum / slice.length
         end
       end
-
 
       def smooth(current, previous)
         return current if previous.empty? || previous.length != current.length
@@ -103,16 +101,25 @@ module MusikVisulizer
         ]
       end
 
-      def draw_info(analysis)
-        beat_marker = analysis[:beat] ? " *** BEAT *** " : ""
-        info =  "Bass:#{(analysis[:bass] * 100).round}% " +
-                "Mid:#{(analysis[:mid] * 100).round}% " +
-                "High:#{(analysis[:high] * 100).round}% " +
-                "RMS:#{(analysis[:rms] * 100).round}%" +
-                beat_marker
+      def draw_bar_at(col, value, draw_rows)
+        bar_height = map_range(value, 0, draw_rows)
+        color = interpolate_color(value)
+        color_code = Renderer::Terminal.rgb_fg(*color)
 
-        color = analysis[:beat] ? Renderer::Terminal.rgb_fg(255, 50, 50) : nil
-        @buffer.write(rows - 1, 0, info.ljust(cols), color: color)
+        draw_rows.times do |row_from_top|
+          row_from_bottom = draw_rows - 1 - row_from_top
+
+          if row_from_bottom < bar_height
+            char = if row_from_bottom == bar_height - 1
+                     block_char(value, draw_rows)
+                   else
+                     CHARS.last
+                   end
+            @buffer.set(row_from_top, col, char, color: color_code)
+          else
+            @buffer.set(row_from_top, col, " ")
+          end
+        end
       end
     end
   end

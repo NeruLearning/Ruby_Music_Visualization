@@ -49,9 +49,11 @@ module MusikVisulizer
 
       def teardown
         show_cursor
-        clear
-        move_cursor(1, 1)
         print RESET_COLOR
+        unless ENV["MUSIK_VISUALIZER_KEEP_SCREEN"] == "1"
+          clear
+          move_cursor(1, 1)
+        end
         @setup_done = false
       end
       

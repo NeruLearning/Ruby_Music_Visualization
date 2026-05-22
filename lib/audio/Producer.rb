@@ -22,7 +22,21 @@ module MusikVisulizer
         @queue = queue
         @tmp_dir = tmp_dir
         @thread = nil
+        @playback_source = nil
+        @playback_mutex = Mutex.new
+        @playback_cv = ConditionVariable.new
         check_dependencies!
+      end
+
+      def wait_for_playback_source(timeout: 30.0)
+        deadline = Time.now + timeout
+        @playback_mutex.synchronize do
+          while @playback_source.nil? && Time.now < deadline
+            remaining = deadline - Time.now
+            @playback_cv.wait(@playback_mutex, [remaining, 0.1].max)
+          end
+          @playback_source
+        end
       end
 
 
@@ -38,7 +52,7 @@ module MusikVisulizer
               produce_chunks(url)
             end
           rescue => e
-            puts "[Producer] Error processing URL #{url}: #{e.message}"
+            $stderr.puts "[Producer] Error processing URL #{url}: #{e.message}"
           ensure
             @queue.close
           end
@@ -62,57 +76,57 @@ module MusikVisulizer
       # VIdeo
       def produce_chunks(url)
         duration = fetch_duration(url)
-        
+
+        source, temp_source = prepare_source(url)
+        set_playback_source(source)
         offset = 0
         index = 0
 
-        while offset < duration
-          chunk_path = download_chunk(url, offset, CHUNK_DURATION, index)
-          wav_path = convert_to_wav(chunk_path, index)
-          cleanup(chunk_path)
-          
-          @queue.push(wav_path)
+        begin
+          while offset < duration
+            segment_duration = [CHUNK_DURATION, duration - offset].min
+            wav_path = download_chunk(source, offset, segment_duration, index)
 
-          offset += CHUNK_DURATION
-          index += 1
+            @queue.push(wav_path)
+
+            offset += segment_duration
+            index += 1
+          end
+        ensure
+          cleanup(source) if temp_source
         end
       end
 
-      def download_chunk(url, offset, duration, index)
-        output_path = File.join(@tmp_dir, "chunk_#{index}.%(ext)s")
-        section = "*#{format_time(offset)}-#{format_time(offset + duration)}"
+      def download_chunk(source, offset, duration, index)
+        output_path = File.join(@tmp_dir, "chunk_#{index}.wav")
 
         cmd = [
-          "yt-dlp",
-          "--no-playlist",
-          "--extract-audio",
-          "--audio-format", "best",
-          "--audio-quality", "0",
-          "--download-sections", section,
-          "--output", output_path,
-          "--print", "after_move:filepath",
-          "--no-progress",
-          url
+          "ffmpeg",
+          "-y",
+          "-ss", offset.to_s,
+          "-t", duration.to_s,
+          "-i", source,
+          "-acodec", "pcm_s16le",
+          "-ar", SAMPLE_RATE.to_s,
+          "-ac", CHANNELS.to_s,
+          "-af", CENTER_STEREO_FILTER,
+          output_path,
+          "-loglevel", "error"
         ]
-        stdout, stderr, status = Open3.capture3(*cmd)
 
-        unless status.success?
-          raise ProducerError, "yt-dlp chunk #{index} fehlgeschlagen:\n#{stderr.strip}"
-        end
-
-        path = stdout.lines.map(&:strip).reject(&:empty?).last
-        raise ProducerError, "missing" if path.nil? || !File.exist?(path)
-
-        path
+        _, stderr, status = Open3.capture3(*cmd)
+        raise ProducerError, "ffmpeg chunk #{index} fehlgeschlagen:\n#{stderr.strip}" unless status.success?
+        output_path
       end
 
 
 
       def produce_livestream(url)
-        puts "[producer] Livestream erkannt — kontinuierlicher Modus"
+        $stderr.puts "[producer] Livestream erkannt — kontinuierlicher Modus"
  
         # yt-dlp gibt die Stream-URL aus, ffmpeg liest direkt davon
         stream_url = fetch_stream_url(url)
+        set_playback_source(stream_url)
         index      = 0
  
         # ffmpeg liest endlos vom Stream und schreibt Segmente
@@ -142,7 +156,7 @@ module MusikVisulizer
           # Warten bis Segment existiert und vollstaendig ist
           wait_for_segment(chunk_path)
  
-          puts "[producer] Livestream-Chunk #{index + 1} bereit"
+          $stderr.puts "[producer] Livestream-Chunk #{index + 1} bereit"
           @queue.push(chunk_path)
           index += 1
         end
@@ -175,7 +189,8 @@ module MusikVisulizer
         cmd = [
           "yt-dlp",
           "--get-url",
-          "--extract-audio",
+          "-f", "bestaudio",
+          "--no-playlist",
           url
         ]
         stdout, stderr, status = Open3.capture3(*cmd)
@@ -184,24 +199,50 @@ module MusikVisulizer
         stdout.strip
       end
 
-      def convert_to_wav(input_path, index)
-        output_path = File.join(@tmp_dir, "chunk_#{index}.wav")
-
+      def fetch_audio_url(url)
         cmd = [
-          "ffmpeg",
-          "-y",
-          "-i", input_path,
-          "-acodec", "pcm_s16le",
-          "-ar", SAMPLE_RATE.to_s,
-          "-ac", CHANNELS.to_s,
-          "-af", CENTER_STEREO_FILTER,
-          output_path,
-          "-loglevel", "error"
+          "yt-dlp",
+          "--get-url",
+          "-f", "bestaudio",
+          "--no-playlist",
+          url
+        ]
+        stdout, stderr, status = Open3.capture3(*cmd)
+        raise ProducerError, "Audio-URL: #{stderr.strip}" unless status.success?
+
+        audio_url = stdout.lines.map(&:strip).reject(&:empty?).first
+        raise ProducerError, "Audio-URL fehlt" if audio_url.nil? || audio_url.empty?
+
+        audio_url
+      end
+
+      def prepare_source(url)
+        output_path = File.join(@tmp_dir, "source.%(ext)s")
+        cmd = [
+          "yt-dlp",
+          "--no-playlist",
+          "-f", "bestaudio",
+          "--output", output_path,
+          "--print", "after_move:filepath",
+          url
         ]
 
-        _, stderr, status = Open3.capture3(*cmd)
-        raise ProducerError, "ffmpeg conversion: #{stderr.strip}" unless status.success?
-        output_path
+        stdout, stderr, status = Open3.capture3(*cmd)
+        if status.success?
+          path = stdout.lines.map(&:strip).reject(&:empty?).last
+          return [path, true] if path && File.exist?(path)
+        end
+
+        warn "[Producer] Fallback to stream source: #{stderr.strip}" unless stderr.to_s.strip.empty?
+        [fetch_audio_url(url), false]
+      end
+
+      def set_playback_source(source)
+        @playback_mutex.synchronize do
+          return if @playback_source
+          @playback_source = source
+          @playback_cv.broadcast
+        end
       end
 
       def fetch_duration(url)

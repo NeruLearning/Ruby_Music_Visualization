@@ -8,15 +8,13 @@ module MusikVisulizer
         @terminal = terminal
         @rows = terminal.rows
         @cols = terminal.cols
-
         @current = build_empty_buffer
         @next = build_empty_buffer
-
+        @needs_full_redraw = false
       end
 
       def set(row, col, char, color: nil)
         return if out_of_bounds?(row, col)
-
         @next[row][col] = Cell.new(char, color)
       end
 
@@ -35,10 +33,26 @@ module MusikVisulizer
         @rows.times { |row| clear_row(row) }
       end
 
+      def sync_size
+        @terminal.update_size
+        return false if @terminal.rows == @rows && @terminal.cols == @cols
+
+        @rows = @terminal.rows
+        @cols = @terminal.cols
+        @terminal.clear
+        @current = build_empty_buffer
+        @next = build_empty_buffer
+        true
+      end
+
       def flush
-        if @terminal.rows != @rows || @terminal.cols != @cols
-          resize(@terminal.rows, @terminal.cols)
-          return
+        # Resize zwischen Render und Flush: @next ist ungueltig, Frame verwerfen.
+        return if sync_size
+
+        # Vollständigen Redraw erzwingen falls angefordert
+        if @needs_full_redraw
+          @current = build_empty_buffer
+          @needs_full_redraw = false
         end
 
         changes = collect_changes
@@ -58,7 +72,6 @@ module MusikVisulizer
           @cols.times do |col|
             next_cell = @next[row][col]
             current_cell = @current[row][col]
-            
             unless cells_equal?(next_cell, current_cell)
               changes << [row, col, next_cell]
             end
@@ -107,14 +120,6 @@ module MusikVisulizer
 
       def out_of_bounds?(row, col)
         row < 0 || row >= @rows || col < 0 || col >= @cols
-      end
-
-      def resize(new_rows, new_cols)
-        @rows = new_rows
-        @cols = new_cols
-        @current = build_empty_buffer
-        @next = build_empty_buffer
-        @terminal.clear
       end
     end
   end
